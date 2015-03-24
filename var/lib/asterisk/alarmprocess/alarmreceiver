@@ -1,0 +1,121 @@
+#!/bin/bash
+source /var/lib/asterisk/alarmprocess/alarmprocess.conf
+myname=`echo $0 | gawk -F\/  '{print $NF}'`
+logger -t ${myname} -p ${logfacility}.${loglevel} "Starting"
+mkdir -p /var/spool/alarms
+
+
+################################################################################
+# This is a script which should take the string received from                  #
+# the alarm receiver application, give it a unique id and insert it            #
+# into a MySQL table.                                                          #
+#                                                                              #
+# Once the data is entered, it should call a second script with the            #
+# unique id of this alarm.  That script will then determine what to            #
+# do about the alarm.                                                          #
+################################################################################
+
+
+################################################################################
+# Set some Global Variables
+
+# We'll log a bunch of stuff we do
+logfile='/var/log/alarmreceiver.log'
+
+hostname=`hostname | cut -f1 -d\.`
+################################################################################
+
+
+
+# Asterisk will create a file for each event it receives
+# The location where this file is written is defined in
+# /etc/asterisk/alarmreceiver.conf
+
+# We are going to do the next step on each file
+# that Asterisk has created.  We could do this for only one file
+# by commenting out the next line and un-commenting out
+# the following line.
+for almfile in `ls -t /var/tmp/alarm `
+#for almfile in `ls -t /var/tmp/alarm | head -1`
+do
+
+file="/var/tmp/alarm/$almfile"
+logger -t ${myname} -p ${logfacility}.${loglevel} "Processing file ${file}"
+
+# Define the current time
+now=`date +%Y%m%d%H%M%S`
+
+# Create a unique ID for this alarm transaction
+uniqid=`echo $now-$RANDOM`
+
+# Grab the callerid number from the file
+CALLINGFROM=`grep CALLINGFROM $file | cut -f2 -d=`
+
+# Grap the callerid name from the file
+# I think this is broke, so I'll have to look at it later
+CALLERNAME=`grep CALLERNAME $file | cut -f2 -d=`
+
+# Grab the timestamp from the file.  This is the time that Asterisk
+# received the alarm transaction
+TIMESTAMP=`grep TIMESTAMP $file | cut -f2 -d=`
+
+logger -t ${myname} -p ${logfacility}.${loglevel} "timestamp is $TIMESTAMP"
+# Grab the actual alarm transaction from the file
+EVENT=`grep ^[0-9] $file `
+
+# Split the fields into the Ademco/SIA ContactID fields
+ACCT=`echo $EVENT | cut -b1-4`
+MT=`echo $EVENT | cut -b5-6`
+Q=`echo $EVENT | cut -b7`
+XYZ=`echo $EVENT | cut -b8-10`
+GG=`echo $EVENT | cut -b11-12`
+CCC=`echo $EVENT | cut -b13-15`
+S=`echo $EVENT | cut -b16`
+
+################################################################################
+# Start Logging
+################################################################################
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|Alarm String was $EVENT"
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|System Number $ACCT"
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|Message Type $MT"
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|Event Qualifier $Q"
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|Event Code $XYZ"
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|Group $GG"
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|Zone $CCC"
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|Checksum $S"
+
+
+md5sum=`echo "$ACCT$MT$Q$XYZ$GG$CCC$S$TIMESTAMP$CALLINGFROM$hostname" | md5sum -  | cut -f1 -d\  `
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|md5sum ${md5sum}"
+
+################################################################################
+
+# Load the data into the database
+
+# New Table
+$mysql -vv -e "insert into events (acct,mt,q,event,gg,zone,cksm,received,calleridnum,receiver,uniqueid) values ('$ACCT','$MT','$Q','$XYZ','$GG','$CCC','$S','$TIMESTAMP','$CALLINGFROM','$hostname','$md5sum')" ${db} >> $logfile
+
+
+
+logger -t ${myname} -p ${logfacility}.${loglevel} "${file}|Our uniqid = $md5sum"
+
+
+# We have now logged this event to the log file and we have inserted
+# the data into a database.  T
+
+
+################################################################################
+# Call external program with the unique ID we identified earlier
+logger -t ${myname} -p ${logfacility}.${loglevel} "Calling /opt/alarmreceiver/bin/alarmprocess.php $md5sum"
+# /opt/alarmreceiver/bin/alarmprocess.sh $md5sum
+/opt/alarmreceiver/bin/alarmprocess.php $md5sum
+
+
+# Take the file that Asterisk created and move it to a backup location
+# Some other process should be in place to archive these.
+mv $file /var/spool/alarms
+
+done
+
+logger -t ${myname} -p ${logfacility}.${loglevel} "Complete"
+
